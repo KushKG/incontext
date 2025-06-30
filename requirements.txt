@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+python-multipart
+pydantic
+requests
+sentence-transformers
+hdbscan
+scikit-learn
+openai
+trafilatura
+numpy
+python-dotenv
