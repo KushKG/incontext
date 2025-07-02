@@ -88,8 +88,6 @@ def gpt_event_exraction(article: Dict[str, Any]) -> List[Dict[str, str]]:
     {article_text}
     """
 
-    # print(user_prompt)
-
     response = client.chat.completions.create(
         model="gpt-4o",
         messages=[system_prompt, {"role": "user", "content": user_prompt}],
@@ -112,21 +110,29 @@ def extract_events(article: Dict[str, Any]) -> List[Dict[str, str]]:
     raw_events = gpt_event_exraction(article)
 
     for e in raw_events:
-        # e['date'] = article['published_at']
         e['source_url'] = article['url']
 
     return raw_events
 
 
-def summarize_with_gpt(bullet_points: str) -> str:
+def summarize_with_gpt(bullet_points: str):
     system_prompt = {
         "role": "system",
         "content": "You are an assistant specialized in understanding and summarizing news events."
     }
 
     user_prompt = f"""
-    Summarize the following related news events into a paragraph:
+    Given the following list of related news events, do two things:
 
+    1. Write a short, informative **title** (max 7 words) that captures the main theme.
+    2. Write a concise **summary paragraph** that connects the events.
+
+    Format your response exactly like this:
+
+    Title: <your title here>
+    Summary: <your paragraph summary here>
+
+    Events:
     {bullet_points}
     """
 
@@ -135,10 +141,20 @@ def summarize_with_gpt(bullet_points: str) -> str:
         messages=[system_prompt, {"role": "user", "content": user_prompt}],
         temperature=0.3
     )
-    
-    print(response.choices[0].message.content.strip())
+    output = response.choices[0].message.content.strip()
 
-    return response.choices[0].message.content.strip()
+    # Split the response
+    title = ""
+    summary = ""
+    for line in output.splitlines():
+        if line.startswith("Title:"):
+            title = line.replace("Title:", "").strip()
+        elif line.startswith("Summary:"):
+            summary = line.replace("Summary:", "").strip()
+        elif title and summary:
+            break
+
+    return title, summary
 
 
 def cluster_events(events: List[Dict[str, str]]) -> Dict[int, List[Dict[str, str]]]:
@@ -146,19 +162,19 @@ def cluster_events(events: List[Dict[str, str]]) -> Dict[int, List[Dict[str, str
     clusterer = hdbscan.HDBSCAN(min_cluster_size=2)
     labels = clusterer.fit_predict(embeddings)
 
-    print(f"Found {len(set(labels))} total labels (including noise).")
+    print(f"Found {len(set(labels))} total clusters (including noise).")
 
     clustered = {}
     for idx, label in enumerate(labels):
         # We no longer skip -1 (noise points)
         clustered.setdefault(label, []).append(events[idx])
 
-    # Print all clusters including noise
-    for label, items in clustered.items():
-        label_str = f"Cluster {label}" if label != -1 else "Noise Cluster (-1)"
-        print(f"\n{label_str}:")
-        for event in items:
-            print(f"- {event['date']}: {event['event']}")
+    # # Print all clusters including noise
+    # for label, items in clustered.items():
+    #     label_str = f"Cluster {label}" if label != -1 else "Noise Cluster (-1)"
+    #     print(f"\n{label_str}:")
+    #     for event in items:
+    #         print(f"- {event['date']}: {event['event']}")
 
     return clustered
 
@@ -189,12 +205,14 @@ def cluster_temporal_then_semantic(events: List[Dict[str, str]]) -> List[Dict[st
         # Not enough events → summarize the whole time group
         if len(time_group) < 5:
             bullet_points = "\n".join([f"- {e['date']}: {e['event']}" for e in time_group])
-            summary = summarize_with_gpt(bullet_points)
+            title, summary = summarize_with_gpt(bullet_points)
+
             full_timeline.append({
                 "time_window": f"{time_group[0]['date']} – {time_group[-1]['date']}",
                 "substories": [{
+                    "title": title,
                     "summary": summary,
-                    "events": time_group
+                    "events": time_group,
                 }]
             })
         else:
@@ -205,10 +223,12 @@ def cluster_temporal_then_semantic(events: List[Dict[str, str]]) -> List[Dict[st
             for sublabel, cluster_events_list in semantic_clusters.items():
                 cluster_events_list = sorted(cluster_events_list, key=lambda e: e['date'])
                 bullet_points = "\n".join([f"- {e['date']}: {e['event']}" for e in cluster_events_list])
-                summary = summarize_with_gpt(bullet_points)
+                title, summary = summarize_with_gpt(bullet_points)
+
                 substories.append({
+                    "title": title,
                     "summary": summary,
-                    "events": cluster_events_list
+                    "events": cluster_events_list,
                 })
 
             full_timeline.append({
@@ -220,11 +240,12 @@ def cluster_temporal_then_semantic(events: List[Dict[str, str]]) -> List[Dict[st
 
 def run_incontext(query: str) -> Dict[str, Any]:
     articles = get_articles(query)
-    # events = sum([extract_events(article) for article in articles], [])
-    events = [{'event': 'Iran arrests hundreds accused of spying for Israel and fast-tracks executions.', 'date': '2025/06/28', 'source_url': 'https://freerepublic.com/focus/f-news/4325853/posts'}, {'event': 'BBC Persian reports 35 Jewish citizens detained in Iran accused of spying.', 'date': '2025/06/28', 'source_url': 'https://freerepublic.com/focus/f-news/4325853/posts'}, {'event': 'Amnesty International calls on Iran to halt executions.', 'date': '2025/06/28', 'source_url': 'https://freerepublic.com/focus/f-news/4325853/posts'}, {'event': 'IDF Chief of Staff reveals commando forces acted in Iran.', 'date': '2025/06/25', 'source_url': 'https://freerepublic.com/focus/f-news/4325853/posts'}, {'event': 'IDF kills Hakham Muhammad Issa Al-Issa, a key Hamas founder, in an airstrike in Gaza City.', 'date': '2025/06/27', 'source_url': 'https://www.foxnews.com/world/idf-kills-key-hamas-founder-deemed-orchestrator-oct-7-terror-attack-israel'}, {'event': 'IDF kills Abbas Al-Hassan Wahbi, a Hezbollah terrorist, in southern Lebanon.', 'date': '2025/06/28', 'source_url': 'https://www.foxnews.com/world/idf-kills-key-hamas-founder-deemed-orchestrator-oct-7-terror-attack-israel'}, {'event': 'IDF kills Saeed Izadi, an Iranian commander involved in arming and funding Hamas.', 'date': '2025/06/28', 'source_url': 'https://www.foxnews.com/world/idf-kills-key-hamas-founder-deemed-orchestrator-oct-7-terror-attack-israel'}, {'event': 'Israeli strikes kill at least 72 people in Gaza', 'date': '2025/06/28', 'source_url': 'https://www.abc.net.au/news/2025-06-29/israel-strikes-gaza-displacement-tents-ceasefire-talks-improve/105473676'}, {'event': 'US President Donald Trump suggests ceasefire agreement could occur in the next week', 'date': '2025/06/27', 'source_url': 'https://www.abc.net.au/news/2025-06-29/israel-strikes-gaza-displacement-tents-ceasefire-talks-improve/105473676'}, {'event': 'Israeli Minister for Strategic Affairs Ron Dermer to arrive in Washington for talks', 'date': '2025/07/01', 'source_url': 'https://www.abc.net.au/news/2025-06-29/israel-strikes-gaza-displacement-tents-ceasefire-talks-improve/105473676'}, {'event': 'Palestinian Hamas militants attack Israel, taking hostages and killing 1,200 people', 'date': '2023/10/07', 'source_url': 'https://www.abc.net.au/news/2025-06-29/israel-strikes-gaza-displacement-tents-ceasefire-talks-improve/105473676'}, {'event': 'More than 6,000 killed since latest ceasefire ended', 'date': '2025/06/28', 'source_url': 'https://www.abc.net.au/news/2025-06-29/israel-strikes-gaza-displacement-tents-ceasefire-talks-improve/105473676'}, {'event': 'Hundreds killed while seeking food in Gaza', 'date': '2025/06/28', 'source_url': 'https://www.abc.net.au/news/2025-06-29/israel-strikes-gaza-displacement-tents-ceasefire-talks-improve/105473676'}, {'event': 'Israeli strikes killed at least 72 people across Gaza', 'date': '2025/06/28', 'source_url': 'https://japantoday.com/category/world/at-least-60-people-killed-in-israeli-strikes-in-gaza-as-ceasefire-prospects-inch-closer'}, {'event': 'Three children and their parents were killed in an Israeli strike on a tent camp in Muwasi', 'date': '2025/06/28', 'source_url': 'https://japantoday.com/category/world/at-least-60-people-killed-in-israeli-strikes-in-gaza-as-ceasefire-prospects-inch-closer'}, {'event': '12 people killed near the Palestine Stadium in Gaza City', 'date': '2025/06/28', 'source_url': 'https://japantoday.com/category/world/at-least-60-people-killed-in-israeli-strikes-in-gaza-as-ceasefire-prospects-inch-closer'}, {'event': 'Eight people killed in apartments in Gaza City', 'date': '2025/06/28', 'source_url': 'https://japantoday.com/category/world/at-least-60-people-killed-in-israeli-strikes-in-gaza-as-ceasefire-prospects-inch-closer'}, {'event': 'A midday strike killed 11 people on a street in eastern Gaza City', 'date': '2025/06/28', 'source_url': 'https://japantoday.com/category/world/at-least-60-people-killed-in-israeli-strikes-in-gaza-as-ceasefire-prospects-inch-closer'}, {'event': 'A strike on a gathering in eastern Gaza City killed eight including five children', 'date': '2025/06/28', 'source_url': 'https://japantoday.com/category/world/at-least-60-people-killed-in-israeli-strikes-in-gaza-as-ceasefire-prospects-inch-closer'}, {'event': 'A strike on a gathering at the entrance to the Bureij refugee camp killed two', 'date': '2025/06/28', 'source_url': 'https://japantoday.com/category/world/at-least-60-people-killed-in-israeli-strikes-in-gaza-as-ceasefire-prospects-inch-closer'}, {'event': 'Two people killed by Israeli gunfire while waiting to receive aid near the Netzarim corridor', 'date': '2025/06/28', 'source_url': 'https://japantoday.com/category/world/at-least-60-people-killed-in-israeli-strikes-in-gaza-as-ceasefire-prospects-inch-closer'}, {'event': 'Trump Administration targets Iranian Christians for deportation.', 'date': '2025/06/19', 'source_url': 'https://reason.com/volokh/2025/06/28/trump-administration-targets-iranian-christians-for-deportation/'}, {'event': 'Pastor Ara Torosian publishes a letter to his church.', 'date': '2025/06/19', 'source_url': 'https://reason.com/volokh/2025/06/28/trump-administration-targets-iranian-christians-for-deportation/'}, {'event': 'ICE agents arrest two Iranian church members in Los Angeles.', 'date': '2025/06/24', 'source_url': 'https://reason.com/volokh/2025/06/28/trump-administration-targets-iranian-christians-for-deportation/'}, {'event': 'Bombing of Iranian nuclear facilities in Fordow, Isfahan, and Natanz by the U.S.', 'date': '2025/06/01', 'source_url': 'https://www.dailysignal.com/2025/06/28/trump-learned-the-lessons-of-iraq/'}, {'event': 'Ceasefire between Israel and Iran', 'date': '2025/06/01', 'source_url': 'https://www.dailysignal.com/2025/06/28/trump-learned-the-lessons-of-iraq/'}, {'event': 'Naftali Bennett calls for a comprehensive hostage deal to end the war in Gaza.', 'date': '2025/06/28', 'source_url': 'https://www.haaretz.com/israel-news/2025-06-28/ty-article/ex-pm-bennett-calls-for-hostage-deal-says-only-a-post-netanyahu-govt-can-defeat-hamas/00000197-b7d6-df21-a1df-f7defefe0000'}, {'event': 'Naftali Bennett announces he will not join a future Netanyahu-led government.', 'date': '2025/06/28', 'source_url': 'https://www.haaretz.com/israel-news/2025-06-28/ty-article/ex-pm-bennett-calls-for-hostage-deal-says-only-a-post-netanyahu-govt-can-defeat-hamas/00000197-b7d6-df21-a1df-f7defefe0000'}, {'event': 'Naftali Bennett criticizes Netanyahu for not preparing for action against Iran.', 'date': '2025/06/28', 'source_url': 'https://www.haaretz.com/israel-news/2025-06-28/ty-article/ex-pm-bennett-calls-for-hostage-deal-says-only-a-post-netanyahu-govt-can-defeat-hamas/00000197-b7d6-df21-a1df-f7defefe0000'}, {'event': 'Naftali Bennett registers a new party for the upcoming Knesset elections.', 'date': '2025/04/01', 'source_url': 'https://www.haaretz.com/israel-news/2025-06-28/ty-article/ex-pm-bennett-calls-for-hostage-deal-says-only-a-post-netanyahu-govt-can-defeat-hamas/00000197-b7d6-df21-a1df-f7defefe0000'}, {'event': 'Naftali Bennett discovers lack of budget for a potential strike on Iran upon taking office.', 'date': '2021/01/01', 'source_url': 'https://www.haaretz.com/israel-news/2025-06-28/ty-article/ex-pm-bennett-calls-for-hostage-deal-says-only-a-post-netanyahu-govt-can-defeat-hamas/00000197-b7d6-df21-a1df-f7defefe0000'}, {'event': 'Israel launched air strikes on Iran', 'date': '2025/06/01', 'source_url': 'https://www.abc.net.au/news/2025-06-29/netanyahus-problems-not-going-away-after-iran-war/105473164'}, {'event': 'Operation Rising Lion officially named', 'date': '2025/06/01', 'source_url': 'https://www.abc.net.au/news/2025-06-29/netanyahus-problems-not-going-away-after-iran-war/105473164'}, {'event': 'Polling released during and after the war suggests no significant shift in voter base', 'date': '2025/06/15', 'source_url': 'https://www.abc.net.au/news/2025-06-29/netanyahus-problems-not-going-away-after-iran-war/105473164'}, {'event': 'Protesters gather in Tel Aviv over ongoing Israel-Gaza war', 'date': '2025/06/28', 'source_url': 'https://www.abc.net.au/news/2025-06-29/netanyahus-problems-not-going-away-after-iran-war/105473164'}, {'event': 'Polling released by Channel 12 on support for ending Gaza war', 'date': '2025/03/01', 'source_url': 'https://www.abc.net.au/news/2025-06-29/netanyahus-problems-not-going-away-after-iran-war/105473164'}, {'event': 'IDF and Mossad operation against Iran', 'date': '2025/06/14', 'source_url': 'https://www.israelnationalnews.com/news/410795'}, {'event': "Ongoing campaign against Iran's terror network", 'date': '2023/10/01', 'source_url': 'https://www.israelnationalnews.com/news/410795'}]
+    events = sum([extract_events(article) for article in articles], [])
+    # events = [{'event': 'Republican-led Senate advanced a sweeping domestic policy package for President Donald Trump’s agenda.', 'date': '2025/06/28', 'source_url': 'https://www.nbcnews.com/news/us-news/weekend-rundown-june-29-rcna215664'}, {'event': 'Thom Tillis announced he would not run for re-election.', 'date': '2025/06/29', 'source_url': 'https://www.nbcnews.com/news/us-news/weekend-rundown-june-29-rcna215664'}, {'event': 'Zohran Mamdani, presumptive Democratic nominee for NYC mayor, said billionaires should not exist.', 'date': '2025/06/29', 'source_url': 'https://www.nbcnews.com/news/us-news/weekend-rundown-june-29-rcna215664'}, {'event': "Sen. Chris Murphy called Trump's military strikes on Iranian nuclear facilities 'illegal'.", 'date': '2025/06/29', 'source_url': 'https://www.nbcnews.com/news/us-news/weekend-rundown-june-29-rcna215664'}, {'event': 'Florida is constructing a $450 million-a-year immigration detention center in the Everglades.', 'date': '2025/06/29', 'source_url': 'https://www.nbcnews.com/news/us-news/weekend-rundown-june-29-rcna215664'}, {'event': 'Detroit Mayor Mike Duggan announced running for Michigan governor as an independent.', 'date': '2025/06/29', 'source_url': 'https://www.nbcnews.com/news/us-news/weekend-rundown-june-29-rcna215664'}, {'event': "Average air quality index in Hanoi breached 'hazardous' threshold of 300.", 'date': '2025/01/15', 'source_url': 'https://www.nbcnews.com/news/us-news/weekend-rundown-june-29-rcna215664'}, {'event': 'Israeli Defense Forces killed Hamas co-founder Hakham Muhammad Issa Al-Issa in Gaza City.', 'date': '2025/06/28', 'source_url': 'https://www.nbcnews.com/news/us-news/weekend-rundown-june-29-rcna215664'}, {'event': 'At least 71 people were killed in an Israeli attack on Tehran’s Evin prison.', 'date': '2025/06/28', 'source_url': 'https://www.nbcnews.com/news/us-news/weekend-rundown-june-29-rcna215664'}, {'event': 'Former Minnesota House Speaker Melissa Hortman was laid to rest.', 'date': '2025/06/28', 'source_url': 'https://www.nbcnews.com/news/us-news/weekend-rundown-june-29-rcna215664'}, {'event': "Beyoncé's concert in Houston was interrupted due to a flying-car prop malfunction.", 'date': '2025/06/28', 'source_url': 'https://www.nbcnews.com/news/us-news/weekend-rundown-june-29-rcna215664'}, {'event': 'Funeral held for Adriana Smith, kept on life support until her baby was born.', 'date': '2025/06/28', 'source_url': 'https://www.nbcnews.com/news/us-news/weekend-rundown-june-29-rcna215664'}, {'event': 'Democratic Republic of Congo and Rwanda signed a U.S.-mediated peace deal.', 'date': '2025/06/28', 'source_url': 'https://www.nbcnews.com/news/us-news/weekend-rundown-june-29-rcna215664'}, {'event': 'Budapest Pride defied a ban under Hungary’s new law.', 'date': '2025/06/28', 'source_url': 'https://www.nbcnews.com/news/us-news/weekend-rundown-june-29-rcna215664'}, {'event': 'Explosion and fire in Philadelphia resulted in one death and two injuries.', 'date': '2025/06/29', 'source_url': 'https://www.nbcnews.com/news/us-news/weekend-rundown-june-29-rcna215664'}, {'event': 'NBA cooperating with a federal investigation into Malik Beasley.', 'date': '2025/06/29', 'source_url': 'https://www.nbcnews.com/news/us-news/weekend-rundown-june-29-rcna215664'}, {'event': 'Zohran Mamdani wins New York City mayoral primary election against Andrew Cuomo.', 'date': '2025/06/24', 'source_url': 'https://economictimes.indiatimes.com/news/international/us/zohran-mamdani-as-new-york-mayoral-candidate-for-democratic-party-only-helps-donald-trump-in-midterm-elections-feel-worried-democrats/articleshow/122147321.cms'}, {'event': 'Donald Trump returns to the White House and Republicans win control of Congress.', 'date': '2024/11/05', 'source_url': 'https://economictimes.indiatimes.com/news/international/us/zohran-mamdani-as-new-york-mayoral-candidate-for-democratic-party-only-helps-donald-trump-in-midterm-elections-feel-worried-democrats/articleshow/122147321.cms'}, {'event': 'Eric Adams runs as an independent in the upcoming New York mayoral election.', 'date': '2025/11/04', 'source_url': 'https://economictimes.indiatimes.com/news/international/us/zohran-mamdani-as-new-york-mayoral-candidate-for-democratic-party-only-helps-donald-trump-in-midterm-elections-feel-worried-democrats/articleshow/122147321.cms'}, {'event': "Zohran Mamdani criticized for his stance on Israel's war in Gaza.", 'date': '2025/06/01', 'source_url': 'https://economictimes.indiatimes.com/news/international/us/zohran-mamdani-as-new-york-mayoral-candidate-for-democratic-party-only-helps-donald-trump-in-midterm-elections-feel-worried-democrats/articleshow/122147321.cms'}, {'event': "Cuomo's election loss in Democratic primary reveals weakened NYC unions", 'date': '2025/06/29', 'source_url': 'https://nypost.com/2025/06/29/us-news/cuomos-election-loss-reveals-onetime-kingmaker-nyc-unions-now-toothless-paper-tigers/'}, {'event': 'Zohran Mamdani wins Democratic primary race for mayor', 'date': '2025/06/29', 'source_url': 'https://nypost.com/2025/06/29/us-news/cuomos-election-loss-reveals-onetime-kingmaker-nyc-unions-now-toothless-paper-tigers/'}, {'event': 'Union membership in New York City falls to about 20% in 2024', 'date': '2024/01/01', 'source_url': 'https://nypost.com/2025/06/29/us-news/cuomos-election-loss-reveals-onetime-kingmaker-nyc-unions-now-toothless-paper-tigers/'}, {'event': 'Many union households voted for Republican President Trump', 'date': '2024/01/01', 'source_url': 'https://nypost.com/2025/06/29/us-news/cuomos-election-loss-reveals-onetime-kingmaker-nyc-unions-now-toothless-paper-tigers/'}, {'event': "Zohran Mamdani wins New York City's mayoral primary", 'date': '2025/06/22', 'source_url': 'https://www.foxnews.com/media/democratic-socialist-candidate-nyc-mayor-gift-republican-party-gop-senator-says'}, {'event': 'Curtis Sliwa vows to stay in NYC mayoral race', 'date': '2025/06/29', 'source_url': 'https://www.foxnews.com/politics/sliwa-slams-exit-rumors-blames-adams-mamdani-rise-talks-possible-trump-endorsement'}, {'event': 'Curtis Sliwa survived a mob hit', 'date': '1992/01/01', 'source_url': 'https://www.foxnews.com/politics/sliwa-slams-exit-rumors-blames-adams-mamdani-rise-talks-possible-trump-endorsement'}, {'event': 'Curtis Sliwa ran against Eric Adams in NYC mayoral election', 'date': '2021/11/02', 'source_url': 'https://www.foxnews.com/politics/sliwa-slams-exit-rumors-blames-adams-mamdani-rise-talks-possible-trump-endorsement'}, {'event': 'Eric Adams faced federal corruption charges', 'date': '2023/01/01', 'source_url': 'https://www.foxnews.com/politics/sliwa-slams-exit-rumors-blames-adams-mamdani-rise-talks-possible-trump-endorsement'}, {'event': 'Charges against Eric Adams were dropped by Trump administration', 'date': '2023/01/01', 'source_url': 'https://www.foxnews.com/politics/sliwa-slams-exit-rumors-blames-adams-mamdani-rise-talks-possible-trump-endorsement'}, {'event': 'Andrew Cuomo lost Democratic primary to Zohran Mamdani', 'date': '2025/06/22', 'source_url': 'https://www.foxnews.com/politics/sliwa-slams-exit-rumors-blames-adams-mamdani-rise-talks-possible-trump-endorsement'}, {'event': "Trump threatened to cut New York City's federal funding if Zohran Mamdani wins the mayoral election.", 'date': '2025/06/29', 'source_url': 'https://www.salon.com/2025/06/29/not-getting-any-money-trump-says-hell-pull-nycs-federal-funding-if-mamdani-wins-mayorship/'}, {'event': "Zohran Mamdani discussed his campaign and platform on 'Meet the Press'.", 'date': '2025/06/29', 'source_url': 'https://www.salon.com/2025/06/29/not-getting-any-money-trump-says-hell-pull-nycs-federal-funding-if-mamdani-wins-mayorship/'}, {'event': "Zohran Mamdani wins the Democratic primary for NYC mayor's race.", 'date': '2025/06/24', 'source_url': 'https://fortune.com/2025/06/29/zohran-mamdani-new-york-city-mayoral-race-billionaires-communist-trump/'}, {'event': 'Zohran Mamdani interviewed on NBC’s Meet the Press.', 'date': '2025/06/29', 'source_url': 'https://fortune.com/2025/06/29/zohran-mamdani-new-york-city-mayoral-race-billionaires-communist-trump/'}, {'event': 'Bill Ackman pledges to bankroll any candidate capable of defeating Mamdani.', 'date': '2025/06/25', 'source_url': 'https://fortune.com/2025/06/29/zohran-mamdani-new-york-city-mayoral-race-billionaires-communist-trump/'}, {'event': 'NYC general election scheduled for November 4.', 'date': '2025/11/04', 'source_url': 'https://fortune.com/2025/06/29/zohran-mamdani-new-york-city-mayoral-race-billionaires-communist-trump/'}, {'event': 'Zohran Mamdani, presumptive Democratic nominee for NYC mayor, states billionaires should not exist.', 'date': '2025/06/29', 'source_url': 'https://www.nbcnews.com/politics/elections/zohran-mamdani-says-dont-think-billionaires-rcna215821'}, {'event': 'Bill Ackman pledges to fund a challenger to Zohran Mamdani in the general election.', 'date': '2025/06/26', 'source_url': 'https://www.nbcnews.com/politics/elections/zohran-mamdani-says-dont-think-billionaires-rcna215821'}, {'event': 'Donald Trump threatens to pull federal funding from NYC if Mamdani becomes mayor.', 'date': '2025/06/27', 'source_url': 'https://www.nbcnews.com/politics/elections/zohran-mamdani-says-dont-think-billionaires-rcna215821'}, {'event': 'Diamant Hysenaj announces challenge against Alexandria Ocasio-Cortez', 'date': '2025/06/29', 'source_url': 'https://nypost.com/2025/06/29/us-news/diamant-hysenaj-gop-businessman-and-immigrant-from-kosovo-to-challenge-aoc/'}, {'event': "Hysenaj's family leaves Kosovo due to war", 'date': '1991/01/01', 'source_url': 'https://nypost.com/2025/06/29/us-news/diamant-hysenaj-gop-businessman-and-immigrant-from-kosovo-to-challenge-aoc/'}, {'event': 'Alexandria Ocasio-Cortez first elected to Congress', 'date': '2018/11/06', 'source_url': 'https://nypost.com/2025/06/29/us-news/diamant-hysenaj-gop-businessman-and-immigrant-from-kosovo-to-challenge-aoc/'}, {'event': 'Zohran Mamdani wins Democratic primary for mayor', 'date': '2025/06/22', 'source_url': 'https://nypost.com/2025/06/29/us-news/diamant-hysenaj-gop-businessman-and-immigrant-from-kosovo-to-challenge-aoc/'}, {'event': 'Zohran Mamdani proposes a 2% Millionaire Tax on New Yorkers earning over $1 million annually.', 'date': '2025/06/29', 'source_url': 'https://economictimes.indiatimes.com/news/international/us/zohran-mamdani-pushes-2-millionaire-tax-on-nycs-richest-is-there-a-mayhem-ahead-for-the-rich/articleshow/122145795.cms'}, {'event': 'Zohran Mamdani enters politics.', 'date': '2021/01/01', 'source_url': 'https://economictimes.indiatimes.com/news/international/us/zohran-mamdani-pushes-2-millionaire-tax-on-nycs-richest-is-there-a-mayhem-ahead-for-the-rich/articleshow/122145795.cms'}, {'event': 'New York State collected $108.6 billion in tax revenue for the 2022–2023 fiscal year.', 'date': '2023/01/01', 'source_url': 'https://economictimes.indiatimes.com/news/international/us/zohran-mamdani-pushes-2-millionaire-tax-on-nycs-richest-is-there-a-mayhem-ahead-for-the-rich/articleshow/122145795.cms'}]
     print(events)
 
     timeline = cluster_temporal_then_semantic(events)
+
     return {
         "query": query,
         "timeline": timeline
